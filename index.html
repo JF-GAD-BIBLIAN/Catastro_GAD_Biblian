@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Visor Catastral</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+body{margin:0;font-family:Arial,sans-serif}
+#map{width:100vw;height:100vh}
+
+.panel{
+ position:absolute;top:10px;left:10px;
+ background:white;padding:10px;border-radius:6px;
+ box-shadow:0 2px 8px rgba(0,0,0,.3);
+ z-index:1000;font-size:13px;width:270px
+}
+.panel input,.panel select,.panel button{width:100%;margin-bottom:6px}
+.panel hr{margin:8px 0}
+
+.legend{
+ background:white;padding:8px;border-radius:6px;
+ box-shadow:0 2px 6px rgba(0,0,0,.3);
+ font-size:12px;line-height:18px
+}
+.legend i{
+ width:14px;height:14px;float:left;
+ margin-right:6px;opacity:.9
+}
+</style>
+</head>
+<body>
+
+<div class="panel">
+<b>Visor Catastral</b>
+<hr>
+
+<b>Buscar por clave</b>
+<input id="clave" placeholder="Clave catastral">
+<button onclick="buscarPorClave()">Buscar</button>
+
+<hr>
+<b>Buscar por Lat / Lon</b>
+<input id="lat" type="number" step="any" placeholder="Latitud">
+<input id="lon" type="number" step="any" placeholder="Longitud">
+<button onclick="irALatLon()">Ir (Lat/Lon)</button>
+
+<hr>
+<b>Buscar por UTM</b>
+<input id="utm_x" type="number" step="any" placeholder="Este (X)">
+<input id="utm_y" type="number" step="any" placeholder="Norte (Y)">
+<input id="utm_zona" type="number" value="17">
+<select id="utm_hemi">
+ <option value="south">Sur</option>
+ <option value="north">Norte</option>
+</select>
+<button onclick="irAUTM()">Ir (UTM)</button>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/proj4/dist/proj4.js"></script>
+
+<script>
+// ================= MAPA =================
+const map=L.map('map').setView([0,0],2);
+
+// ================= MAPAS BASE =================
+const osm=L.tileLayer(
+ 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+ {maxZoom:20, attribution:'© OpenStreetMap'}
+);
+
+const satelite=L.tileLayer(
+ 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+ {maxZoom:20, attribution:'© Esri'}
+);
+
+satelite.addTo(map);
+
+L.control.scale({metric:true,imperial:false}).addTo(map);
+
+// ================= CAPAS =================
+const capaRios=L.layerGroup().addTo(map);
+const capaRurales=L.layerGroup().addTo(map);
+const capaUrbanos=L.layerGroup().addTo(map);
+const capaPuntos=L.layerGroup().addTo(map);
+
+const indiceClaves={};
+let activo=null;
+
+// ================= HIDROGRAFÍA =================
+fetch('Quebradas_Rios.geojson').then(r=>r.json()).then(d=>{
+ capaRios.addLayer(L.geoJSON(d,{
+  style:f=>{
+   const t=(f.properties.TIPO||'').toUpperCase();
+   return t==='RIO'
+    ?{color:'#0055ff',weight:2.5}
+    :{color:'#66ccff',weight:2};
+  }
+ }));
+});
+
+// ================= ESTILOS =================
+function estiloRural(z){
+ if(z<14)return{color:'#1b7f3b',weight:.5,fillColor:'#7fcf9b',fillOpacity:.25};
+ if(z<17)return{color:'#1b7f3b',weight:1,fillColor:'#7fcf9b',fillOpacity:.35};
+ return{color:'#1b7f3b',weight:1.5,fillColor:'#7fcf9b',fillOpacity:.45};
+}
+function estiloUrbano(z){
+ if(z<15)return{color:'#444',weight:.6,fillColor:'#bbb',fillOpacity:.25};
+ if(z<18)return{color:'#444',weight:1,fillColor:'#bbb',fillOpacity:.4};
+ return{color:'#444',weight:1.6,fillColor:'#bbb',fillOpacity:.55};
+}
+
+// ================= RURALES =================
+let ruralGeo=null;
+fetch('Predios_rurales_GAD.geojson').then(r=>r.json()).then(d=>{
+ ruralGeo=L.geoJSON(d,{
+  style:()=>estiloRural(map.getZoom()),
+  onEachFeature:(f,l)=>{
+   l.on({
+    mouseover:()=>l.setStyle({weight:3}),
+    mouseout:()=>l.setStyle(estiloRural(map.getZoom()))
+   });
+   let h='';
+   for(let k in f.properties)
+     h+=`<b>${k}:</b> ${f.properties[k]}<br>`;
+   l.bindPopup(h);
+  }
+ });
+ capaRurales.addLayer(ruralGeo);
+});
+
+// ================= URBANOS (INFORMACIÓN COMPLETA) =================
+let urbanoGeo=null;
+fetch('Predios_GAD.geojson').then(r=>r.json()).then(d=>{
+ urbanoGeo=L.geoJSON(d,{
+  style:()=>estiloUrbano(map.getZoom()),
+  onEachFeature:(f,l)=>{
+
+   const p=f.properties;
+
+   if(p.clave_cat) indiceClaves[p.clave_cat]=l;
+
+   l.on({
+    mouseover:()=>l.setStyle({weight:3}),
+    mouseout:()=>l.setStyle(estiloUrbano(map.getZoom()))
+   });
+
+   let h='<b>Predio urbano</b><br>';
+
+   // 🔓 MOSTRAR TODOS LOS ATRIBUTOS
+   for(let k in p){
+     h+=`<b>${k}:</b> ${p[k]}<br>`;
+   }
+
+   l.bindPopup(h);
+  }
+ });
+ capaUrbanos.addLayer(urbanoGeo);
+ map.fitBounds(urbanoGeo.getBounds());
+});
+
+// ================= PUNTOS =================
+fetch('Etiquetas_predios_rurales.geojson').then(r=>r.json()).then(d=>{
+ capaPuntos.addLayer(L.geoJSON(d,{
+  pointToLayer:(f,ll)=>L.circleMarker(ll,{
+   radius:4,color:'#ff0000',fillColor:'#ff0000',fillOpacity:1
+  }),
+  onEachFeature:(f,l)=>{
+   const clave=f.properties["Clave Pred"];
+   if(clave)indiceClaves[clave]=l;
+   let h='';
+   for(let k in f.properties)
+     h+=`<b>${k}:</b> ${f.properties[k]}<br>`;
+   l.bindPopup(h);
+  }
+ }));
+});
+
+// ================= BUSCADOR =================
+function buscarPorClave(){
+ const c=document.getElementById('clave').value.trim();
+ const o=indiceClaves[c];
+ if(!o){alert('Clave no encontrada');return;}
+ if(activo&&activo.setStyle)activo.setStyle({weight:1});
+ activo=o;
+ if(o.getBounds){
+  o.setStyle({color:'#ff9900',weight:4});
+  map.fitBounds(o.getBounds());
+ }else{
+  map.setView(o.getLatLng(),18);
+ }
+ o.openPopup();
+}
+
+// ================= LAT/LON =================
+let marcador=null;
+function irALatLon(){
+ const la=parseFloat(lat.value),lo=parseFloat(lon.value);
+ if(isNaN(la)||isNaN(lo))return;
+ if(marcador)map.removeLayer(marcador);
+ marcador=L.marker([la,lo]).addTo(map);
+ map.setView([la,lo],18);
+}
+
+// ================= UTM =================
+function utmProj(zone,hemi){
+ return `+proj=utm +zone=${zone} +datum=WGS84 +units=m +no_defs ${hemi==='south'?'+south':''}`;
+}
+function irAUTM(){
+ const x=parseFloat(utm_x.value),y=parseFloat(utm_y.value);
+ const z=parseInt(utm_zona.value),h=utm_hemi.value;
+ if(isNaN(x)||isNaN(y)||isNaN(z))return;
+ const [lon,lat]=proj4(utmProj(z,h),'EPSG:4326',[x,y]);
+ if(marcador)map.removeLayer(marcador);
+ marcador=L.marker([lat,lon]).addTo(map);
+ map.setView([lat,lon],18);
+}
+
+// ================= CONTROL DE CAPAS =================
+L.control.layers(
+ {
+  "Imagen satelital":satelite,
+  "OpenStreetMap":osm
+ },
+ {
+  "Ríos y quebradas":capaRios,
+  "Predios rurales":capaRurales,
+  "Predios urbanos":capaUrbanos,
+  "Puntos":capaPuntos
+ },
+ {collapsed:false}
+).addTo(map);
+
+// ================= ACTUALIZAR ESTILOS =================
+map.on('zoomend',()=>{
+ if(ruralGeo)ruralGeo.setStyle(estiloRural(map.getZoom()));
+ if(urbanoGeo)urbanoGeo.setStyle(estiloUrbano(map.getZoom()));
+});
+</script>
+</body>
+</html>
+
